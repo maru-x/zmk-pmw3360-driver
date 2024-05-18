@@ -415,27 +415,27 @@ static int set_sample_time(const struct device *dev, uint8_t reg_addr_lower,
   return err;
 }
 
-static int set_rest_modes(const struct device *dev, uint8_t reg_addr,
-                          bool enable) {
-  uint8_t value;
-  int err = reg_read(dev, reg_addr, &value);
-
-  if (err) {
-    LOG_ERR("Failed to read Config2 register");
-    return err;
-  }
-
-  WRITE_BIT(value, PMW3360_REST_EN_POS, enable);
-
-  LOG_INF("%sable rest modes", (enable) ? ("En") : ("Dis"));
-  err = reg_write(dev, reg_addr, value);
-
-  if (err) {
-    LOG_ERR("Failed to set rest mode");
-  }
-
-  return err;
-}
+// static int set_rest_modes(const struct device *dev, uint8_t reg_addr,
+//                           bool enable) {
+//   uint8_t value;
+//   int err = reg_read(dev, reg_addr, &value);
+//
+//   if (err) {
+//     LOG_ERR("Failed to read Config2 register");
+//     return err;
+//   }
+//
+//   WRITE_BIT(value, PMW3360_REST_EN_POS, enable);
+//
+//   LOG_INF("%sable rest modes", (enable) ? ("En") : ("Dis"));
+//   err = reg_write(dev, reg_addr, value);
+//
+//   if (err) {
+//     LOG_ERR("Failed to set rest mode");
+//   }
+//
+//   return err;
+// }
 
 static void set_interrupt(const struct device *dev, const bool en) {
   //    LOG_INF("In pwm3360_set_interrupt");
@@ -558,7 +558,7 @@ static int pmw3360_async_init_fw_load_verify(const struct device *dev) {
 static int pmw3360_async_init_configure(const struct device *dev) {
   LOG_INF("Starting pmw3360_async_init_configure");
   const struct pixart_config *config = dev->config;
-  int err;
+  int err = 0;
 
   if (!err) {
     err = set_cpi(dev, config->cpi);
@@ -727,11 +727,12 @@ static int pmw3360_report_data(const struct device *dev) {
   //       (buf[PMW3360_Y_L_POS] + ((buf[PMW3360_XY_H_POS] & 0x0F) << 8)), 12);
 
   int16_t raw_x =
-      ((int16_t)sys_get_le16(buf[PMW3360_DX_POS])) / PMW3360_CPI_DIVIDOR;
+      ((int16_t)sys_get_le16(&buf[PMW3360_DX_POS])) / PMW3360_CPI_DIVIDOR;
   int16_t raw_y =
-      ((int16_t)sys_get_le16(buf[PMW3360_DY_POS])) / PMW3360_CPI_DIVIDOR;
-  int16_t x;
-  int16_t y;
+      ((int16_t)sys_get_le16(&buf[PMW3360_DY_POS])) / PMW3360_CPI_DIVIDOR;
+
+  int16_t x = 0;
+  int16_t y = 0;
 
   if (IS_ENABLED(CONFIG_PMW3360_ORIENTATION_0)) {
     x = -raw_x;
@@ -895,7 +896,7 @@ static int pmw3360_attr_set(const struct device *dev, enum sensor_channel chan,
   return err;
 }
 
-static const struct sensor_driver_api pmw3360_driver_api = {
+const struct sensor_driver_api pmw3360_driver_api = {
     .attr_set = pmw3360_attr_set,
 };
 
