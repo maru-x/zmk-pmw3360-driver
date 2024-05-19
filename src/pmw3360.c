@@ -18,7 +18,7 @@
 #include <zmk/keymap.h>
 
 #include <zephyr/logging/log.h>
-LOG_MODULE_REGISTER(pmw3360, CONFIG_PMW3360_LOG_LEVEL);
+LOG_MODULE_REGISTER(pmw3360, CONFIG_INPUT_LOG_LEVEL);
 
 extern const size_t pmw3360_firmware_length;
 extern const uint8_t pmw3360_firmware_data[];
