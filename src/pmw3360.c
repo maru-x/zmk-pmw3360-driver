@@ -382,6 +382,14 @@ static int set_downshift_time(const struct device *dev, uint8_t reg_addr,
   return err;
 }
 
+static int set_cpi_if_needed(const struct device *dev, uint32_t cpi) {
+  struct pixart_data *data = dev->data;
+  if (cpi != data->curr_cpi) {
+    return set_cpi(dev, cpi);
+  }
+  return 0;
+}
+
 /* Set sampling rate in each mode (in ms) */
 static int set_sample_time(const struct device *dev, uint8_t reg_addr_lower,
                            uint8_t reg_addr_upper, uint32_t sample_time) {
@@ -562,7 +570,6 @@ static int pmw3360_async_init_configure(const struct device *dev) {
 
   err = set_cpi(dev, config->cpi);
 
-
   if (!err) {
     err = set_downshift_time(dev, PMW3360_REG_RUN_DOWNSHIFT,
                              CONFIG_PMW3360_RUN_DOWNSHIFT_TIME_MS);
@@ -702,30 +709,29 @@ static int pmw3360_report_data(const struct device *dev) {
     return -EBUSY;
   }
 
-  
-int32_t dividor;
-  enum pixart_input_mode input_mode = get_input_mode_for_current_layer(dev);
-  bool input_mode_changed = data->curr_mode != input_mode;
-  switch (input_mode) {
-  case MOVE:
-    set_cpi_if_needed(dev, CONFIG_PMW3360_CPI);
-    dividor = CONFIG_PMW3360_CPI_DIVIDOR;
-    break;
-  case SCROLL:
-    set_cpi_if_needed(dev, CONFIG_PMW3360_CPI);
-    if (input_mode_changed) {
-      data->scroll_delta_x = 0;
-      data->scroll_delta_y = 0;
-    }
-    dividor = 1; // this should be handled with the ticks rather than dividors
-    break;
-  case SNIPE:
-    set_cpi_if_needed(dev, CONFIG_PMW3360_SNIPE_CPI);
-    dividor = CONFIG_PMW3360_SNIPE_CPI_DIVIDOR;
-    break;
-  default:
-    return -ENOTSUP;
-  }
+  int32_t dividor;
+  // enum pixart_input_mode input_mode = get_input_mode_for_current_layer(dev);
+  // bool input_mode_changed = data->curr_mode != input_mode;
+  // switch (input_mode) {
+  // case MOVE:
+  set_cpi_if_needed(dev, CONFIG_PMW3360_CPI);
+  dividor = CONFIG_PMW3360_CPI_DIVIDOR;
+  //   break;
+  // case SCROLL:
+  //   set_cpi_if_needed(dev, CONFIG_PMW3360_CPI);
+  //   if (input_mode_changed) {
+  //     data->scroll_delta_x = 0;
+  //     data->scroll_delta_y = 0;
+  //   }
+  //   dividor = 1; // this should be handled with the ticks rather than
+  //   dividors break;
+  // case SNIPE:
+  //   set_cpi_if_needed(dev, CONFIG_PMW3360_SNIPE_CPI);
+  //   dividor = CONFIG_PMW3360_SNIPE_CPI_DIVIDOR;
+  //   break;
+  // default:
+  //   return -ENOTSUP;
+  // }
 
   data->curr_mode = input_mode;
 
@@ -791,10 +797,10 @@ int32_t dividor;
   // #endif
 
   if (x != 0 || y != 0) {
-    if (input_mode != SCROLL) {
-      input_report_rel(dev, INPUT_REL_X, x, false, K_FOREVER);
-      input_report_rel(dev, INPUT_REL_Y, y, true, K_FOREVER);
-    }
+    // if (input_mode != SCROLL) {
+    input_report_rel(dev, INPUT_REL_X, x, false, K_FOREVER);
+    input_report_rel(dev, INPUT_REL_Y, y, true, K_FOREVER);
+    // }
     //        } else {
     //            data->scroll_delta_x += x;
     //            data->scroll_delta_y += y;
