@@ -383,8 +383,8 @@ static int set_downshift_time(const struct device *dev, uint8_t reg_addr,
 }
 
 static int set_cpi_if_needed(const struct device *dev, uint32_t cpi) {
-  struct pixart_data *data = dev->data;
-  if (cpi != data->curr_cpi) {
+  const struct pixart_config *config = dev->config;
+  if (cpi != config->cpi) {
     return set_cpi(dev, cpi);
   }
   return 0;
@@ -733,7 +733,7 @@ static int pmw3360_report_data(const struct device *dev) {
   //   return -ENOTSUP;
   // }
 
-  data->curr_mode = input_mode;
+  // data->curr_mode = input_mode;
 
   // #if AUTOMOUSE_LAYER > 0
   //     if (input_mode == MOVE &&
