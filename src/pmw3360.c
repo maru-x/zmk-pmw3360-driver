@@ -26,567 +26,570 @@ extern const uint8_t pmw3360_firmware_data[];
 //////// Sensor initialization steps definition //////////
 // init is done in non-blocking manner (i.e., async), a //
 // delayable work is defined for this purpose           //
-enum async_init_step {
-  ASYNC_INIT_STEP_POWER_UP,      // power up reset
-  ASYNC_INIT_STEP_FW_LOAD_START, // clear motion registers, disable REST mode,
-                                 // enable SROM register
-  ASYNC_INIT_STEP_FW_LOAD_CONTINUE, // start SROM download
-  ASYNC_INIT_STEP_FW_LOAD_VERIFY,   // verify SROM pid and fid, enable REST mode
-  ASYNC_INIT_STEP_CONFIGURE, // set cpi and donwshift time (run, rest1, rest2)
-
-  ASYNC_INIT_STEP_COUNT // end flag
-};
+// enum async_init_step {
+//   ASYNC_INIT_STEP_POWER_UP,      // power up reset
+//   ASYNC_INIT_STEP_FW_LOAD_START, // clear motion registers, disable REST
+//   mode,
+//                                  // enable SROM register
+//   ASYNC_INIT_STEP_FW_LOAD_CONTINUE, // start SROM download
+//   ASYNC_INIT_STEP_FW_LOAD_VERIFY,   // verify SROM pid and fid, enable REST
+//   mode ASYNC_INIT_STEP_CONFIGURE, // set cpi and donwshift time (run, rest1,
+//   rest2)
+//
+//   ASYNC_INIT_STEP_COUNT // end flag
+// };
 
 /* Timings (in ms) needed in between steps to allow each step finishes
  * succussfully. */
 // - Since MCU is not involved in the sensor init process, i is allowed to do
 // other tasks.
 //   Thus, k_sleep or delayed schedule can be used.
-static const int32_t async_init_delay[ASYNC_INIT_STEP_COUNT] = {
-    [ASYNC_INIT_STEP_POWER_UP] = 1,
-    [ASYNC_INIT_STEP_FW_LOAD_START] = 50,    // required in spec
-    [ASYNC_INIT_STEP_FW_LOAD_CONTINUE] = 10, // required in spec
-    [ASYNC_INIT_STEP_FW_LOAD_VERIFY] = 1,    [ASYNC_INIT_STEP_CONFIGURE] = 0,
-};
-static int pmw3360_async_init_power_up(const struct device *dev);
-static int pmw3360_async_init_fw_load_start(const struct device *dev);
-static int pmw3360_async_init_fw_load_continue(const struct device *dev);
-static int pmw3360_async_init_fw_load_verify(const struct device *dev);
-static int pmw3360_async_init_configure(const struct device *dev);
-static void pmw3360_gpio_callback(const struct device *gpiob,
-                                  struct gpio_callback *cb, uint32_t pins);
-static void pmw3360_work_callback(struct k_work *work);
+// static const int32_t async_init_delay[ASYNC_INIT_STEP_COUNT] = {
+//     [ASYNC_INIT_STEP_POWER_UP] = 1,
+//     [ASYNC_INIT_STEP_FW_LOAD_START] = 50,    // required in spec
+//     [ASYNC_INIT_STEP_FW_LOAD_CONTINUE] = 10, // required in spec
+//     [ASYNC_INIT_STEP_FW_LOAD_VERIFY] = 1,    [ASYNC_INIT_STEP_CONFIGURE] = 0,
+// };
+// static int pmw3360_async_init_power_up(const struct device *dev);
+// static int pmw3360_async_init_fw_load_start(const struct device *dev);
+// static int pmw3360_async_init_fw_load_continue(const struct device *dev);
+// static int pmw3360_async_init_fw_load_verify(const struct device *dev);
+// static int pmw3360_async_init_configure(const struct device *dev);
+// static void pmw3360_gpio_callback(const struct device *gpiob,
+//                                   struct gpio_callback *cb, uint32_t pins);
+// static void pmw3360_work_callback(struct k_work *work);
 
-static int (*const async_init_fn[ASYNC_INIT_STEP_COUNT])(
-    const struct device *dev) = {
-    [ASYNC_INIT_STEP_POWER_UP] = pmw3360_async_init_power_up,
-    [ASYNC_INIT_STEP_FW_LOAD_START] = pmw3360_async_init_fw_load_start,
-    [ASYNC_INIT_STEP_FW_LOAD_CONTINUE] = pmw3360_async_init_fw_load_continue,
-    [ASYNC_INIT_STEP_FW_LOAD_VERIFY] = pmw3360_async_init_fw_load_verify,
-    [ASYNC_INIT_STEP_CONFIGURE] = pmw3360_async_init_configure,
-};
+// static int (*const async_init_fn[ASYNC_INIT_STEP_COUNT])(
+//     const struct device *dev) = {
+//     [ASYNC_INIT_STEP_POWER_UP] = pmw3360_async_init_power_up,
+//     [ASYNC_INIT_STEP_FW_LOAD_START] = pmw3360_async_init_fw_load_start,
+//     [ASYNC_INIT_STEP_FW_LOAD_CONTINUE] = pmw3360_async_init_fw_load_continue,
+//     [ASYNC_INIT_STEP_FW_LOAD_VERIFY] = pmw3360_async_init_fw_load_verify,
+//     [ASYNC_INIT_STEP_CONFIGURE] = pmw3360_async_init_configure,
+// };
 
 //////// Function definitions //////////
 
 // checked and keep
-static int spi_cs_ctrl(const struct device *dev, bool enable) {
-  const struct pixart_config *config = dev->config;
-  int err;
-
-  if (!enable) {
-    k_busy_wait(T_NCS_SCLK);
-  }
-
-  err = gpio_pin_set_dt(&config->cs_gpio, (int)enable);
-  if (err) {
-    LOG_ERR("SPI CS ctrl failed: %d", err);
-  }
-
-  if (enable) {
-    k_busy_wait(T_NCS_SCLK);
-  }
-
-  return err;
-}
-
-// checked and keep
-static int reg_read(const struct device *dev, uint8_t reg, uint8_t *buf) {
-  int err;
-  struct pixart_data *data = dev->data;
-  const struct pixart_config *config = dev->config;
-
-  __ASSERT_NO_MSG((reg & SPI_WRITE_BIT) == 0);
-
-  err = spi_cs_ctrl(dev, true);
-  if (err) {
-    return err;
-  }
-
-  /* Write register address. */
-  const struct spi_buf tx_buf = {.buf = &reg, .len = 1};
-  const struct spi_buf_set tx = {.buffers = &tx_buf, .count = 1};
-
-  err = spi_write_dt(&config->bus, &tx);
-  if (err) {
-    LOG_ERR("Reg read failed on SPI write: %d", err);
-    return err;
-  }
-
-  k_busy_wait(T_SRAD);
-
-  /* Read register value. */
-  struct spi_buf rx_buf = {
-      .buf = buf,
-      .len = 1,
-  };
-  const struct spi_buf_set rx = {
-      .buffers = &rx_buf,
-      .count = 1,
-  };
-
-  err = spi_read_dt(&config->bus, &rx);
-  if (err) {
-    LOG_ERR("Reg read failed on SPI read: %d", err);
-    return err;
-  }
-
-  err = spi_cs_ctrl(dev, false);
-  if (err) {
-    return err;
-  }
-
-  k_busy_wait(T_SRX);
-
-  data->last_read_burst = false;
-
-  return 0;
-}
-
-// primitive write without enable/disable spi clock on the sensor
-static int reg_write(const struct device *dev, uint8_t reg, uint8_t val) {
-  int err;
-  struct pixart_data *data = dev->data;
-  const struct pixart_config *config = dev->config;
-
-  __ASSERT_NO_MSG((reg & SPI_WRITE_BIT) == 0);
-
-  err = spi_cs_ctrl(dev, true);
-  if (err) {
-    return err;
-  }
-
-  uint8_t buf[] = {SPI_WRITE_BIT | reg, val};
-  const struct spi_buf tx_buf = {.buf = buf, .len = ARRAY_SIZE(buf)};
-  const struct spi_buf_set tx = {.buffers = &tx_buf, .count = 1};
-
-  err = spi_write_dt(&config->bus, &tx);
-  if (err) {
-    LOG_ERR("Reg write failed on SPI write: %d", err);
-    return err;
-  }
-
-  k_busy_wait(T_SCLK_NCS_WR);
-
-  err = spi_cs_ctrl(dev, false);
-  if (err) {
-    return err;
-  }
-
-  k_busy_wait(T_SWX);
-
-  data->last_read_burst = false;
-
-  return 0;
-}
-
-static int motion_burst_read(const struct device *dev, uint8_t *buf,
-                             size_t burst_size) {
-  int err;
-  struct pixart_data *data = dev->data;
-  const struct pixart_config *config = dev->config;
-
-  __ASSERT_NO_MSG(burst_size <= PMW3360_MAX_BURST_SIZE);
-
-  if (!data->last_read_burst) {
-    err = reg_write(dev, PMW3360_REG_MOTION_BURST, 0x00);
-    if (err) {
-      return err;
-    }
-  }
-
-  err = spi_cs_ctrl(dev, true);
-  if (err) {
-    return err;
-  }
-
-  /* Send motion burst address */
-  uint8_t reg_buf[] = {PMW3360_REG_MOTION_BURST};
-  const struct spi_buf tx_buf = {.buf = reg_buf, .len = ARRAY_SIZE(reg_buf)};
-  const struct spi_buf_set tx = {.buffers = &tx_buf, .count = 1};
-
-  err = spi_write_dt(&config->bus, &tx);
-  if (err) {
-    LOG_ERR("Motion burst failed on SPI write: %d", err);
-    return err;
-  }
-
-  k_busy_wait(T_SRAD_MOTBR);
-
-  const struct spi_buf rx_buf = {
-      .buf = buf,
-      .len = burst_size,
-  };
-  const struct spi_buf_set rx = {.buffers = &rx_buf, .count = 1};
-
-  err = spi_read_dt(&config->bus, &rx);
-  if (err) {
-    LOG_ERR("Motion burst failed on SPI read: %d", err);
-    return err;
-  }
-
-  /* Terminate burst */
-  err = spi_cs_ctrl(dev, false);
-  if (err) {
-    return err;
-  }
-
-  /* Terminate burst */
-  k_busy_wait(T_BEXIT);
-
-  data->last_read_burst = true;
-
-  return 0;
-}
-
-/** Writing an array of registers in sequence, used in power-up register
- * initialization and running mode switching */
-static int burst_write(const struct device *dev, const uint8_t reg,
-                       const uint8_t *buf, size_t size) {
-  int err;
-  struct pixart_data *data = dev->data;
-  const struct pixart_config *config = dev->config;
-
-  /* Write address of burst register */
-  uint8_t write_buf = reg | SPI_WRITE_BIT;
-  struct spi_buf tx_buf = {.buf = &write_buf, .len = 1};
-  const struct spi_buf_set tx = {.buffers = &tx_buf, .count = 1};
-
-  err = spi_cs_ctrl(dev, true);
-  if (err) {
-    return err;
-  }
-
-  err = spi_write_dt(&config->bus, &tx);
-  if (err) {
-    LOG_ERR("Burst write failed on SPI write: %d", err);
-    return err;
-  }
-
-  /* Write data */
-  for (size_t i = 0; i < size; i++) {
-    write_buf = buf[i];
-
-    err = spi_write_dt(&config->bus, &tx);
-    if (err) {
-      LOG_ERR("Burst write failed on SPI write (data): %d", err);
-      return err;
-    }
-
-    k_busy_wait(T_BRSEP);
-  }
-
-  /* Terminate burst mode. */
-  err = spi_cs_ctrl(dev, false);
-  if (err) {
-    return err;
-  }
-
-  k_busy_wait(T_BEXIT);
-
-  data->last_read_burst = false;
-
-  return 0;
-}
-
-static int set_cpi(const struct device *dev, uint32_t cpi) {
-  /* Set resolution with CPI step of 100 cpi
-   * 0x00: 100 cpi (minimum cpi)
-   * 0x01: 200 cpi
-   * :
-   * 0x31: 5000 cpi (default cpi)
-   * :
-   * 0x77: 12000 cpi (maximum cpi)
-   */
-
-  if ((cpi > PMW3360_MAX_CPI) || (cpi < PMW3360_MIN_CPI)) {
-    LOG_ERR("CPI value %u out of range", cpi);
-    return -EINVAL;
-  }
-
-  /* Convert CPI to register value */
-  uint8_t value = (cpi / 100) - 1;
-
-  LOG_INF("Setting CPI to %u (reg value 0x%x)", cpi, value);
-
-  int err = reg_write(dev, PMW3360_REG_CONFIG1, value);
-  if (err) {
-    LOG_ERR("Failed to change CPI: %d", err);
-  }
-
-  return err;
-}
-
-/* Set downshift time in ms. */
-// NOTE: The unit of run-mode downshift is related to pos mode rate, which is
-// hard coded to be 4 ms The pos-mode rate is configured in
-// pmw3360_async_init_configure
-static int set_downshift_time(const struct device *dev, uint8_t reg_addr,
-                              uint32_t time) {
-  /* Set downshift time in ms:
-   * - Run downshift time (from Run to Rest1 mode), default: 500ms
-   * - Rest 1 downshift time (from Rest1 to Rest2 mode), default: 9.92 s
-   * - Rest 2 downshift time (from Rest2 to Rest3 mode), default: ~10 min
-   */
-  uint32_t maxtime;
-  uint32_t mintime;
-
-  switch (reg_addr) {
-  case PMW3360_REG_RUN_DOWNSHIFT:
-    /*
-     * Run downshift time = PMW3360_REG_RUN_DOWNSHIFT * 10 ms
-     */
-    maxtime = 2550;
-    mintime = 10;
-    break;
-
-  case PMW3360_REG_REST1_DOWNSHIFT:
-    /*
-     * Rest1 downshift time = PMW3360_REG_RUN_DOWNSHIFT
-     *                        * 320 * Rest1 rate (default 1 ms)
-     */
-    maxtime = 81600;
-    mintime = 320;
-    break;
-
-  case PMW3360_REG_REST2_DOWNSHIFT:
-    /*
-     * Rest2 downshift time = PMW3360_REG_REST2_DOWNSHIFT
-     *                        * 32 * Rest2 rate (default 100 ms)
-     */
-    maxtime = 816000;
-    mintime = 3200;
-    break;
-
-  default:
-    LOG_ERR("Not supported");
-    return -ENOTSUP;
-  }
-
-  if ((time > maxtime) || (time < mintime)) {
-    LOG_WRN("Downshift time %u out of range", time);
-    return -EINVAL;
-  }
-
-  __ASSERT_NO_MSG((mintime > 0) && (maxtime / mintime <= UINT8_MAX));
-
-  /* Convert time to register value */
-  uint8_t value = time / mintime;
-
-  LOG_INF("Set downshift time to %u ms (reg value 0x%x)", time, value);
-
-  int err = reg_write(dev, reg_addr, value);
-  if (err) {
-    LOG_ERR("Failed to change downshift time: %d", err);
-  }
-
-  return err;
-}
-
-static int set_cpi_if_needed(const struct device *dev, uint32_t cpi) {
-  const struct pixart_config *config = dev->config;
-  if (cpi != config->cpi) {
-    return set_cpi(dev, cpi);
-  }
-  return 0;
-}
-
-/* Set sampling rate in each mode (in ms) */
-static int set_sample_time(const struct device *dev, uint8_t reg_addr_lower,
-                           uint8_t reg_addr_upper, uint32_t sample_time) {
-  /* Set sample time for the Rest1-Rest3 modes.
-   * Values above 0x09B0 will trigger internal watchdog reset.
-   */
-  uint32_t maxtime = 0x9B0;
-  uint32_t mintime = 1;
-
-  if ((sample_time > maxtime) || (sample_time < mintime)) {
-    LOG_WRN("Sample time %u out of range", sample_time);
-    return -EINVAL;
-  }
-
-  LOG_INF("Set sample time to %u ms", sample_time);
-
-  /* The sample time is (reg_value + 1) ms. */
-  sample_time--;
-  uint8_t buf[2];
-
-  sys_put_le16((uint16_t)sample_time, buf);
-
-  int err = reg_write(dev, reg_addr_lower, buf[0]);
-
-  if (!err) {
-    err = reg_write(dev, reg_addr_upper, buf[1]);
-  } else {
-    LOG_ERR("Failed to change sample time");
-  }
-
-  return err;
-}
-
-// static int set_rest_modes(const struct device *dev, uint8_t reg_addr,
-//                           bool enable) {
-//   uint8_t value;
-//   int err = reg_read(dev, reg_addr, &value);
+// static int spi_cs_ctrl(const struct device *dev, bool enable) {
+//   const struct pixart_config *config = dev->config;
+//   int err;
 //
-//   if (err) {
-//     LOG_ERR("Failed to read Config2 register");
-//     return err;
+//   if (!enable) {
+//     k_busy_wait(T_NCS_SCLK);
 //   }
 //
-//   WRITE_BIT(value, PMW3360_REST_EN_POS, enable);
-//
-//   LOG_INF("%sable rest modes", (enable) ? ("En") : ("Dis"));
-//   err = reg_write(dev, reg_addr, value);
-//
+//   err = gpio_pin_set_dt(&config->cs_gpio, (int)enable);
 //   if (err) {
-//     LOG_ERR("Failed to set rest mode");
+//     LOG_ERR("SPI CS ctrl failed: %d", err);
+//   }
+//
+//   if (enable) {
+//     k_busy_wait(T_NCS_SCLK);
 //   }
 //
 //   return err;
 // }
-
-static void set_interrupt(const struct device *dev, const bool en) {
-  //    LOG_INF("In pwm3360_set_interrupt");
-  const struct pixart_config *config = dev->config;
-  int ret = gpio_pin_interrupt_configure_dt(
-      &config->irq_gpio, en ? GPIO_INT_LEVEL_ACTIVE : GPIO_INT_DISABLE);
-  if (ret < 0) {
-    LOG_ERR("can't set interrupt");
-  }
-}
-
-static int pmw3360_async_init_power_up(const struct device *dev) {
-  /* Reset sensor */
-  LOG_INF("Starting async_init_power_up");
-
-  return reg_write(dev, PMW3360_REG_POWER_UP_RESET, PMW3360_POWERUP_CMD_RESET);
-}
-
-static int pmw3360_async_init_fw_load_start(const struct device *dev) {
-  LOG_INF("Starting async_init_fw_load_start");
-  int err = 0;
-
-  /* Read from registers 0x02-0x06 regardless of the motion pin state. */
-  for (uint8_t reg = 0x02; (reg <= 0x06) && !err; reg++) {
-    uint8_t buf[1];
-    err = reg_read(dev, reg, buf);
-  }
-
-  if (err) {
-    LOG_ERR("Cannot read from data registers: %d", err);
-    return err;
-  }
-
-  /* Write 0 to Rest_En bit of Config2 register to disable Rest mode. */
-  err = reg_write(dev, PMW3360_REG_CONFIG2, 0x00);
-  if (err) {
-    LOG_ERR("Cannot disable REST mode: %d", err);
-    return err;
-  }
-
-  /* Write 0x1D in SROM_enable register to initialize the operation */
-  err = reg_write(dev, PMW3360_REG_SROM_ENABLE, 0x1D);
-  if (err) {
-    LOG_ERR("Cannot initialize SROM: %d", err);
-    return err;
-  }
-
-  return err;
-}
-
-static int pmw3360_async_init_fw_load_continue(const struct device *dev) {
-  int err;
-
-  LOG_INF("Starting async_init_fw_load_continue");
-  LOG_INF("Uploading optical sensor firmware...");
-
-  /* Write 0x18 to SROM_enable to start SROM download */
-  err = reg_write(dev, PMW3360_REG_SROM_ENABLE, 0x18);
-  if (err) {
-    LOG_ERR("Cannot start SROM download");
-    return err;
-  }
-
-  /* Write SROM file into SROM_Load_Burst register.
-   * Data must start with SROM_Load_Burst address.
-   */
-  err = burst_write(dev, PMW3360_REG_SROM_LOAD_BURST, pmw3360_firmware_data,
-                    pmw3360_firmware_length);
-  if (err) {
-    LOG_ERR("Cannot write firmware to sensor");
-  }
-
-  return err;
-}
-
-static int pmw3360_async_init_fw_load_verify(const struct device *dev) {
-  int err;
-  LOG_INF("Starting async_init_fw_load_verify");
-
-  /* Read the SROM_ID register to verify the firmware ID before any
-   * other register reads or writes
-   */
-
-  uint8_t fw_id;
-  err = reg_read(dev, PMW3360_REG_SROM_ID, &fw_id);
-  if (err) {
-    LOG_ERR("Cannot obtain firmware id: %d", err);
-    return err;
-  }
-
-  LOG_DBG("Optical chip firmware ID: 0x%x", fw_id);
-  if (fw_id != PMW3360_FIRMWARE_ID) {
-    LOG_ERR("Chip is not running from SROM!");
-    return -EIO;
-  }
-
-  uint8_t product_id;
-  err = reg_read(dev, PMW3360_REG_PRODUCT_ID, &product_id);
-  if (err) {
-    LOG_ERR("Cannot obtain product id: %d", err);
-    return err;
-  }
-
-  if (product_id != PMW3360_PRODUCT_ID) {
-    LOG_ERR("Invalid product id!");
-    return -EIO;
-  }
-
-  /* Write 0x20 to Config2 register for wireless mouse design.
-   * This enables entering rest modes.
-   */
-  err = reg_write(dev, PMW3360_REG_CONFIG2, 0x20);
-  if (err) {
-    LOG_ERR("Cannot enable REST modes: %d", err);
-  }
-  LOG_INF("Finished firmware load verify");
-  return err;
-}
-
-static int pmw3360_async_init_configure(const struct device *dev) {
-  LOG_INF("Starting pmw3360_async_init_configure");
-  const struct pixart_config *config = dev->config;
-  int err = 0;
-
-  err = set_cpi(dev, config->cpi);
-
-  if (!err) {
-    err = set_downshift_time(dev, PMW3360_REG_RUN_DOWNSHIFT,
-                             CONFIG_PMW3360_RUN_DOWNSHIFT_TIME_MS);
-  }
-
-  if (!err) {
-    err = set_downshift_time(dev, PMW3360_REG_REST1_DOWNSHIFT,
-                             CONFIG_PMW3360_REST1_DOWNSHIFT_TIME_MS);
-  }
-
-  if (!err) {
-    err = set_downshift_time(dev, PMW3360_REG_REST2_DOWNSHIFT,
-                             CONFIG_PMW3360_REST2_DOWNSHIFT_TIME_MS);
-  }
-
-  return err;
-}
+//
+// // checked and keep
+// static int reg_read(const struct device *dev, uint8_t reg, uint8_t *buf) {
+//   int err;
+//   struct pixart_data *data = dev->data;
+//   const struct pixart_config *config = dev->config;
+//
+//   __ASSERT_NO_MSG((reg & SPI_WRITE_BIT) == 0);
+//
+//   err = spi_cs_ctrl(dev, true);
+//   if (err) {
+//     return err;
+//   }
+//
+//   /* Write register address. */
+//   const struct spi_buf tx_buf = {.buf = &reg, .len = 1};
+//   const struct spi_buf_set tx = {.buffers = &tx_buf, .count = 1};
+//
+//   err = spi_write_dt(&config->bus, &tx);
+//   if (err) {
+//     LOG_ERR("Reg read failed on SPI write: %d", err);
+//     return err;
+//   }
+//
+//   k_busy_wait(T_SRAD);
+//
+//   /* Read register value. */
+//   struct spi_buf rx_buf = {
+//       .buf = buf,
+//       .len = 1,
+//   };
+//   const struct spi_buf_set rx = {
+//       .buffers = &rx_buf,
+//       .count = 1,
+//   };
+//
+//   err = spi_read_dt(&config->bus, &rx);
+//   if (err) {
+//     LOG_ERR("Reg read failed on SPI read: %d", err);
+//     return err;
+//   }
+//
+//   err = spi_cs_ctrl(dev, false);
+//   if (err) {
+//     return err;
+//   }
+//
+//   k_busy_wait(T_SRX);
+//
+//   data->last_read_burst = false;
+//
+//   return 0;
+// }
+//
+// // primitive write without enable/disable spi clock on the sensor
+// static int reg_write(const struct device *dev, uint8_t reg, uint8_t val) {
+//   int err;
+//   struct pixart_data *data = dev->data;
+//   const struct pixart_config *config = dev->config;
+//
+//   __ASSERT_NO_MSG((reg & SPI_WRITE_BIT) == 0);
+//
+//   err = spi_cs_ctrl(dev, true);
+//   if (err) {
+//     return err;
+//   }
+//
+//   uint8_t buf[] = {SPI_WRITE_BIT | reg, val};
+//   const struct spi_buf tx_buf = {.buf = buf, .len = ARRAY_SIZE(buf)};
+//   const struct spi_buf_set tx = {.buffers = &tx_buf, .count = 1};
+//
+//   err = spi_write_dt(&config->bus, &tx);
+//   if (err) {
+//     LOG_ERR("Reg write failed on SPI write: %d", err);
+//     return err;
+//   }
+//
+//   k_busy_wait(T_SCLK_NCS_WR);
+//
+//   err = spi_cs_ctrl(dev, false);
+//   if (err) {
+//     return err;
+//   }
+//
+//   k_busy_wait(T_SWX);
+//
+//   data->last_read_burst = false;
+//
+//   return 0;
+// }
+//
+// static int motion_burst_read(const struct device *dev, uint8_t *buf,
+//                              size_t burst_size) {
+//   int err;
+//   struct pixart_data *data = dev->data;
+//   const struct pixart_config *config = dev->config;
+//
+//   __ASSERT_NO_MSG(burst_size <= PMW3360_MAX_BURST_SIZE);
+//
+//   if (!data->last_read_burst) {
+//     err = reg_write(dev, PMW3360_REG_MOTION_BURST, 0x00);
+//     if (err) {
+//       return err;
+//     }
+//   }
+//
+//   err = spi_cs_ctrl(dev, true);
+//   if (err) {
+//     return err;
+//   }
+//
+//   /* Send motion burst address */
+//   uint8_t reg_buf[] = {PMW3360_REG_MOTION_BURST};
+//   const struct spi_buf tx_buf = {.buf = reg_buf, .len = ARRAY_SIZE(reg_buf)};
+//   const struct spi_buf_set tx = {.buffers = &tx_buf, .count = 1};
+//
+//   err = spi_write_dt(&config->bus, &tx);
+//   if (err) {
+//     LOG_ERR("Motion burst failed on SPI write: %d", err);
+//     return err;
+//   }
+//
+//   k_busy_wait(T_SRAD_MOTBR);
+//
+//   const struct spi_buf rx_buf = {
+//       .buf = buf,
+//       .len = burst_size,
+//   };
+//   const struct spi_buf_set rx = {.buffers = &rx_buf, .count = 1};
+//
+//   err = spi_read_dt(&config->bus, &rx);
+//   if (err) {
+//     LOG_ERR("Motion burst failed on SPI read: %d", err);
+//     return err;
+//   }
+//
+//   /* Terminate burst */
+//   err = spi_cs_ctrl(dev, false);
+//   if (err) {
+//     return err;
+//   }
+//
+//   /* Terminate burst */
+//   k_busy_wait(T_BEXIT);
+//
+//   data->last_read_burst = true;
+//
+//   return 0;
+// }
+//
+// /** Writing an array of registers in sequence, used in power-up register
+//  * initialization and running mode switching */
+// static int burst_write(const struct device *dev, const uint8_t reg,
+//                        const uint8_t *buf, size_t size) {
+//   int err;
+//   struct pixart_data *data = dev->data;
+//   const struct pixart_config *config = dev->config;
+//
+//   /* Write address of burst register */
+//   uint8_t write_buf = reg | SPI_WRITE_BIT;
+//   struct spi_buf tx_buf = {.buf = &write_buf, .len = 1};
+//   const struct spi_buf_set tx = {.buffers = &tx_buf, .count = 1};
+//
+//   err = spi_cs_ctrl(dev, true);
+//   if (err) {
+//     return err;
+//   }
+//
+//   err = spi_write_dt(&config->bus, &tx);
+//   if (err) {
+//     LOG_ERR("Burst write failed on SPI write: %d", err);
+//     return err;
+//   }
+//
+//   /* Write data */
+//   for (size_t i = 0; i < size; i++) {
+//     write_buf = buf[i];
+//
+//     err = spi_write_dt(&config->bus, &tx);
+//     if (err) {
+//       LOG_ERR("Burst write failed on SPI write (data): %d", err);
+//       return err;
+//     }
+//
+//     k_busy_wait(T_BRSEP);
+//   }
+//
+//   /* Terminate burst mode. */
+//   err = spi_cs_ctrl(dev, false);
+//   if (err) {
+//     return err;
+//   }
+//
+//   k_busy_wait(T_BEXIT);
+//
+//   data->last_read_burst = false;
+//
+//   return 0;
+// }
+//
+// static int set_cpi(const struct device *dev, uint32_t cpi) {
+//   /* Set resolution with CPI step of 100 cpi
+//    * 0x00: 100 cpi (minimum cpi)
+//    * 0x01: 200 cpi
+//    * :
+//    * 0x31: 5000 cpi (default cpi)
+//    * :
+//    * 0x77: 12000 cpi (maximum cpi)
+//    */
+//
+//   if ((cpi > PMW3360_MAX_CPI) || (cpi < PMW3360_MIN_CPI)) {
+//     LOG_ERR("CPI value %u out of range", cpi);
+//     return -EINVAL;
+//   }
+//
+//   /* Convert CPI to register value */
+//   uint8_t value = (cpi / 100) - 1;
+//
+//   LOG_INF("Setting CPI to %u (reg value 0x%x)", cpi, value);
+//
+//   int err = reg_write(dev, PMW3360_REG_CONFIG1, value);
+//   if (err) {
+//     LOG_ERR("Failed to change CPI: %d", err);
+//   }
+//
+//   return err;
+// }
+//
+// /* Set downshift time in ms. */
+// // NOTE: The unit of run-mode downshift is related to pos mode rate, which is
+// // hard coded to be 4 ms The pos-mode rate is configured in
+// // pmw3360_async_init_configure
+// static int set_downshift_time(const struct device *dev, uint8_t reg_addr,
+//                               uint32_t time) {
+//   /* Set downshift time in ms:
+//    * - Run downshift time (from Run to Rest1 mode), default: 500ms
+//    * - Rest 1 downshift time (from Rest1 to Rest2 mode), default: 9.92 s
+//    * - Rest 2 downshift time (from Rest2 to Rest3 mode), default: ~10 min
+//    */
+//   uint32_t maxtime;
+//   uint32_t mintime;
+//
+//   switch (reg_addr) {
+//   case PMW3360_REG_RUN_DOWNSHIFT:
+//     /*
+//      * Run downshift time = PMW3360_REG_RUN_DOWNSHIFT * 10 ms
+//      */
+//     maxtime = 2550;
+//     mintime = 10;
+//     break;
+//
+//   case PMW3360_REG_REST1_DOWNSHIFT:
+//     /*
+//      * Rest1 downshift time = PMW3360_REG_RUN_DOWNSHIFT
+//      *                        * 320 * Rest1 rate (default 1 ms)
+//      */
+//     maxtime = 81600;
+//     mintime = 320;
+//     break;
+//
+//   case PMW3360_REG_REST2_DOWNSHIFT:
+//     /*
+//      * Rest2 downshift time = PMW3360_REG_REST2_DOWNSHIFT
+//      *                        * 32 * Rest2 rate (default 100 ms)
+//      */
+//     maxtime = 816000;
+//     mintime = 3200;
+//     break;
+//
+//   default:
+//     LOG_ERR("Not supported");
+//     return -ENOTSUP;
+//   }
+//
+//   if ((time > maxtime) || (time < mintime)) {
+//     LOG_WRN("Downshift time %u out of range", time);
+//     return -EINVAL;
+//   }
+//
+//   __ASSERT_NO_MSG((mintime > 0) && (maxtime / mintime <= UINT8_MAX));
+//
+//   /* Convert time to register value */
+//   uint8_t value = time / mintime;
+//
+//   LOG_INF("Set downshift time to %u ms (reg value 0x%x)", time, value);
+//
+//   int err = reg_write(dev, reg_addr, value);
+//   if (err) {
+//     LOG_ERR("Failed to change downshift time: %d", err);
+//   }
+//
+//   return err;
+// }
+//
+// static int set_cpi_if_needed(const struct device *dev, uint32_t cpi) {
+//   const struct pixart_config *config = dev->config;
+//   if (cpi != config->cpi) {
+//     return set_cpi(dev, cpi);
+//   }
+//   return 0;
+// }
+//
+// /* Set sampling rate in each mode (in ms) */
+// static int set_sample_time(const struct device *dev, uint8_t reg_addr_lower,
+//                            uint8_t reg_addr_upper, uint32_t sample_time) {
+//   /* Set sample time for the Rest1-Rest3 modes.
+//    * Values above 0x09B0 will trigger internal watchdog reset.
+//    */
+//   uint32_t maxtime = 0x9B0;
+//   uint32_t mintime = 1;
+//
+//   if ((sample_time > maxtime) || (sample_time < mintime)) {
+//     LOG_WRN("Sample time %u out of range", sample_time);
+//     return -EINVAL;
+//   }
+//
+//   LOG_INF("Set sample time to %u ms", sample_time);
+//
+//   /* The sample time is (reg_value + 1) ms. */
+//   sample_time--;
+//   uint8_t buf[2];
+//
+//   sys_put_le16((uint16_t)sample_time, buf);
+//
+//   int err = reg_write(dev, reg_addr_lower, buf[0]);
+//
+//   if (!err) {
+//     err = reg_write(dev, reg_addr_upper, buf[1]);
+//   } else {
+//     LOG_ERR("Failed to change sample time");
+//   }
+//
+//   return err;
+// }
+//
+// // static int set_rest_modes(const struct device *dev, uint8_t reg_addr,
+// //                           bool enable) {
+// //   uint8_t value;
+// //   int err = reg_read(dev, reg_addr, &value);
+// //
+// //   if (err) {
+// //     LOG_ERR("Failed to read Config2 register");
+// //     return err;
+// //   }
+// //
+// //   WRITE_BIT(value, PMW3360_REST_EN_POS, enable);
+// //
+// //   LOG_INF("%sable rest modes", (enable) ? ("En") : ("Dis"));
+// //   err = reg_write(dev, reg_addr, value);
+// //
+// //   if (err) {
+// //     LOG_ERR("Failed to set rest mode");
+// //   }
+// //
+// //   return err;
+// // }
+//
+// static void set_interrupt(const struct device *dev, const bool en) {
+//   //    LOG_INF("In pwm3360_set_interrupt");
+//   const struct pixart_config *config = dev->config;
+//   int ret = gpio_pin_interrupt_configure_dt(
+//       &config->irq_gpio, en ? GPIO_INT_LEVEL_ACTIVE : GPIO_INT_DISABLE);
+//   if (ret < 0) {
+//     LOG_ERR("can't set interrupt");
+//   }
+// }
+//
+// static int pmw3360_async_init_power_up(const struct device *dev) {
+//   /* Reset sensor */
+//   LOG_INF("Starting async_init_power_up");
+//
+//   return reg_write(dev, PMW3360_REG_POWER_UP_RESET,
+//   PMW3360_POWERUP_CMD_RESET);
+// }
+//
+// static int pmw3360_async_init_fw_load_start(const struct device *dev) {
+//   LOG_INF("Starting async_init_fw_load_start");
+//   int err = 0;
+//
+//   /* Read from registers 0x02-0x06 regardless of the motion pin state. */
+//   for (uint8_t reg = 0x02; (reg <= 0x06) && !err; reg++) {
+//     uint8_t buf[1];
+//     err = reg_read(dev, reg, buf);
+//   }
+//
+//   if (err) {
+//     LOG_ERR("Cannot read from data registers: %d", err);
+//     return err;
+//   }
+//
+//   /* Write 0 to Rest_En bit of Config2 register to disable Rest mode. */
+//   err = reg_write(dev, PMW3360_REG_CONFIG2, 0x00);
+//   if (err) {
+//     LOG_ERR("Cannot disable REST mode: %d", err);
+//     return err;
+//   }
+//
+//   /* Write 0x1D in SROM_enable register to initialize the operation */
+//   err = reg_write(dev, PMW3360_REG_SROM_ENABLE, 0x1D);
+//   if (err) {
+//     LOG_ERR("Cannot initialize SROM: %d", err);
+//     return err;
+//   }
+//
+//   return err;
+// }
+//
+// static int pmw3360_async_init_fw_load_continue(const struct device *dev) {
+//   int err;
+//
+//   LOG_INF("Starting async_init_fw_load_continue");
+//   LOG_INF("Uploading optical sensor firmware...");
+//
+//   /* Write 0x18 to SROM_enable to start SROM download */
+//   err = reg_write(dev, PMW3360_REG_SROM_ENABLE, 0x18);
+//   if (err) {
+//     LOG_ERR("Cannot start SROM download");
+//     return err;
+//   }
+//
+//   /* Write SROM file into SROM_Load_Burst register.
+//    * Data must start with SROM_Load_Burst address.
+//    */
+//   err = burst_write(dev, PMW3360_REG_SROM_LOAD_BURST, pmw3360_firmware_data,
+//                     pmw3360_firmware_length);
+//   if (err) {
+//     LOG_ERR("Cannot write firmware to sensor");
+//   }
+//
+//   return err;
+// }
+//
+// static int pmw3360_async_init_fw_load_verify(const struct device *dev) {
+//   int err;
+//   LOG_INF("Starting async_init_fw_load_verify");
+//
+//   /* Read the SROM_ID register to verify the firmware ID before any
+//    * other register reads or writes
+//    */
+//
+//   uint8_t fw_id;
+//   err = reg_read(dev, PMW3360_REG_SROM_ID, &fw_id);
+//   if (err) {
+//     LOG_ERR("Cannot obtain firmware id: %d", err);
+//     return err;
+//   }
+//
+//   LOG_DBG("Optical chip firmware ID: 0x%x", fw_id);
+//   if (fw_id != PMW3360_FIRMWARE_ID) {
+//     LOG_ERR("Chip is not running from SROM!");
+//     return -EIO;
+//   }
+//
+//   uint8_t product_id;
+//   err = reg_read(dev, PMW3360_REG_PRODUCT_ID, &product_id);
+//   if (err) {
+//     LOG_ERR("Cannot obtain product id: %d", err);
+//     return err;
+//   }
+//
+//   if (product_id != PMW3360_PRODUCT_ID) {
+//     LOG_ERR("Invalid product id!");
+//     return -EIO;
+//   }
+//
+//   /* Write 0x20 to Config2 register for wireless mouse design.
+//    * This enables entering rest modes.
+//    */
+//   err = reg_write(dev, PMW3360_REG_CONFIG2, 0x20);
+//   if (err) {
+//     LOG_ERR("Cannot enable REST modes: %d", err);
+//   }
+//   LOG_INF("Finished firmware load verify");
+//   return err;
+// }
+//
+// static int pmw3360_async_init_configure(const struct device *dev) {
+//   LOG_INF("Starting pmw3360_async_init_configure");
+//   const struct pixart_config *config = dev->config;
+//   int err = 0;
+//
+//   err = set_cpi(dev, config->cpi);
+//
+//   if (!err) {
+//     err = set_downshift_time(dev, PMW3360_REG_RUN_DOWNSHIFT,
+//                              CONFIG_PMW3360_RUN_DOWNSHIFT_TIME_MS);
+//   }
+//
+//   if (!err) {
+//     err = set_downshift_time(dev, PMW3360_REG_REST1_DOWNSHIFT,
+//                              CONFIG_PMW3360_REST1_DOWNSHIFT_TIME_MS);
+//   }
+//
+//   if (!err) {
+//     err = set_downshift_time(dev, PMW3360_REG_REST2_DOWNSHIFT,
+//                              CONFIG_PMW3360_REST2_DOWNSHIFT_TIME_MS);
+//   }
+//
+//   return err;
+// }
 
 static void pmw3360_async_init(struct k_work *work) {
   LOG_INF("Starting pmw3360_async_init");
@@ -596,7 +599,7 @@ static void pmw3360_async_init(struct k_work *work) {
 
   LOG_INF("async init step %d", data->async_init_step);
 
-  data->err = async_init_fn[data->async_init_step](dev);
+  // data->err = async_init_fn[data->async_init_step](dev);
   if (data->err) {
     LOG_ERR("initialization failed");
   } else {
@@ -605,47 +608,47 @@ static void pmw3360_async_init(struct k_work *work) {
     if (data->async_init_step == ASYNC_INIT_STEP_COUNT) {
       data->ready = true; // sensor is ready to work
       LOG_INF("PMW3360 initialized");
-      set_interrupt(dev, true);
+      // set_interrupt(dev, true);
     } else {
-      k_work_schedule(&data->init_work,
-                      K_MSEC(async_init_delay[data->async_init_step]));
+      // k_work_schedule(&data->init_work,
+      // K_MSEC(async_init_delay[data->async_init_step]));
     }
   }
 }
 
-static int pmw3360_init_irq(const struct device *dev) {
-  int err;
-  LOG_INF("Initializing IRQ");
-  struct pixart_data *data = dev->data;
-  const struct pixart_config *config = dev->config;
-
-  // check readiness of irq gpio pin
-  if (!device_is_ready(config->irq_gpio.port)) {
-    LOG_ERR("IRQ GPIO device not ready");
-    return -ENODEV;
-  }
-
-  // init the irq pin
-  err = gpio_pin_configure_dt(&config->irq_gpio, GPIO_INPUT);
-  if (err) {
-    LOG_ERR("Cannot configure IRQ GPIO: %d", err);
-    return err;
-  }
-
-  // setup and add the irq callback associated
-  gpio_init_callback(&data->irq_gpio_cb, pmw3360_gpio_callback,
-                     BIT(config->irq_gpio.pin));
-
-  err = gpio_add_callback(config->irq_gpio.port, &data->irq_gpio_cb);
-  if (err) {
-    LOG_ERR("Cannot add IRQ GPIO callback: %d", err);
-  }
-
-  LOG_INF("Configure irq done");
-
-  return err;
-}
-
+// static int pmw3360_init_irq(const struct device *dev) {
+//   int err;
+//   LOG_INF("Initializing IRQ");
+//   struct pixart_data *data = dev->data;
+//   const struct pixart_config *config = dev->config;
+//
+//   // check readiness of irq gpio pin
+//   if (!device_is_ready(config->irq_gpio.port)) {
+//     LOG_ERR("IRQ GPIO device not ready");
+//     return -ENODEV;
+//   }
+//
+//   // init the irq pin
+//   err = gpio_pin_configure_dt(&config->irq_gpio, GPIO_INPUT);
+//   if (err) {
+//     LOG_ERR("Cannot configure IRQ GPIO: %d", err);
+//     return err;
+//   }
+//
+//   // setup and add the irq callback associated
+//   gpio_init_callback(&data->irq_gpio_cb, pmw3360_gpio_callback,
+//                      BIT(config->irq_gpio.pin));
+//
+//   err = gpio_add_callback(config->irq_gpio.port, &data->irq_gpio_cb);
+//   if (err) {
+//     LOG_ERR("Cannot add IRQ GPIO callback: %d", err);
+//   }
+//
+//   LOG_INF("Configure irq done");
+//
+//   return err;
+// }
+//
 static int pmw3360_init(const struct device *dev) {
   LOG_INF("Starting pmw3360_init");
 
@@ -678,10 +681,10 @@ static int pmw3360_init(const struct device *dev) {
   }
 
   // init irq routine
-  err = pmw3360_init_irq(dev);
-  if (err) {
-    return err;
-  }
+  // err = pmw3360_init_irq(dev);
+  // if (err) {
+  //   return err;
+  // }
 
   // Setup delayable and non-blocking init jobs, including following steps:
   // 1. power reset
@@ -840,7 +843,9 @@ static void pmw3360_work_callback(struct k_work *work) {
   struct pixart_data *data =
       CONTAINER_OF(work, struct pixart_data, trigger_work);
   const struct device *dev = data->dev;
-  pmw3360_report_data(dev);
+
+  LOG_DBG("Report data");
+  // pmw3360_report_data(dev);
   set_interrupt(dev, true);
 }
 
