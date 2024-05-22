@@ -709,13 +709,13 @@ static int pmw3360_report_data(const struct device *dev) {
     return -EBUSY;
   }
 
-  int32_t dividor;
+  // int32_t dividor;
   // enum pixart_input_mode input_mode = get_input_mode_for_current_layer(dev);
   // bool input_mode_changed = data->curr_mode != input_mode;
   // switch (input_mode) {
   // case MOVE:
-  set_cpi_if_needed(dev, CONFIG_PMW3360_CPI);
-  dividor = CONFIG_PMW3360_CPI_DIVIDOR;
+  // set_cpi_if_needed(dev, CONFIG_PMW3360_CPI);
+  // dividor = CONFIG_PMW3360_CPI_DIVIDOR;
   //   break;
   // case SCROLL:
   //   set_cpi_if_needed(dev, CONFIG_PMW3360_CPI);
