@@ -6,7 +6,7 @@
 
 #define DT_DRV_COMPAT pixart_pmw3610
 
-#include <sensor/pmw3610.h>
+#include <pmw3610.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/sensor.h>
