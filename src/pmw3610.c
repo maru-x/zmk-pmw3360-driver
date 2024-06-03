@@ -11,6 +11,8 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/drivers/spi.h>
+#include <zephyr/dt-bindings/input/input-event-codes.h>
+#include <zephyr/input/input.h>
 #include <zephyr/kernel.h>
 #include <zephyr/sys/byteorder.h>
 
@@ -825,6 +827,13 @@ static int pmw3610_sample_fetch(const struct device *dev,
     } else if (IS_ENABLED(CONFIG_PMW3610_ORIENTATION_270)) {
       data->x = -y;
       data->y = -x;
+    }
+
+    if (data->x != 0) {
+      input_report_rel(dev, INPUT_REL_X, data->x, false, K_FOREVER);
+    }
+    if (data->y != 0) {
+      input_report_rel(dev, INPUT_REL_Y, data->y, true, K_FOREVER);
     }
   }
 
