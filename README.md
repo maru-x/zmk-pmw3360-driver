@@ -2,7 +2,10 @@ PMW3610 driver implementation for ZMK with at least Zephyr 3.5
 
 This work is based on [ufan's implementation](https://github.com/ufan/zmk/tree/support-trackpad) of the driver.
 
-**PMW3610 board available for purchase -- email contact@trentrand.com**
+> I would recommend using the PMW3610 instead, which has a lower power use and is readily supported by ZMK
+> 
+> **[🛒 Purchase the PMW3610 Breakout Board on Tindie](https://www.tindie.com/products/randware/pmw3610-breakout-board/)**
+
 
 ## Installation
 
