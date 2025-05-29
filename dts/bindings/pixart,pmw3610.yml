@@ -7,5 +7,21 @@ include: spi-device.yaml
 
 properties:
     irq-gpios:
-      type: phandle-array
-      required: true
+        type: phandle-array
+        required: true
+
+    # ここから追記 ↓↓
+    automouse-layer:
+        type: int
+        required: true
+        description: "Trackball 操作中に自動的にアクティブにするレイヤー番号"
+
+    scroll-layers:
+        type: int
+        required: true
+        description: "スクロールモード時に切り替えるレイヤー一覧"
+
+    snipe-layers:
+        type: int
+        required: true
+        description: "スナイプ（精密移動）モード時に切り替えるレイヤー一覧"
